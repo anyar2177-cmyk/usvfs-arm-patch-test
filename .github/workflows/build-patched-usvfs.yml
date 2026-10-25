@@ -1,0 +1,126 @@
+name: Build USVFS 0.5.7.2 ARM64 Patch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Download USVFS 0.5.7.2 source
+        uses: actions/checkout@v4
+        with:
+          repository: ModOrganizer2/usvfs
+          ref: v0.5.7.2
+          path: usvfs
+
+      - name: Apply ARM64 stack alignment patch
+        shell: pwsh
+        run: |
+          $patch = "$env:GITHUB_WORKSPACE\arm64-stack-alignment.patch"
+
+          Invoke-WebRequest `
+            -Uri "https://github.com/ModOrganizer2/usvfs/commit/8577455.patch" `
+            -OutFile $patch
+
+          git -C usvfs apply --check $patch
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Patch tidak cocok dengan source."
+          }
+
+          git -C usvfs apply $patch
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Gagal menerapkan patch ARM64."
+          }
+
+          $source = Get-Content "usvfs\src\tinjectlib\injectlib.cpp" -Raw
+
+          if ($source -notmatch 'assembler\.and_\(rsp, -16\)') {
+            throw "Kode ARM64 tidak ditemukan setelah patch."
+          }
+
+          Write-Host "Patch ARM64 berhasil diterapkan."
+
+      - name: Configure vcpkg
+        shell: pwsh
+        run: |
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build x64
+        shell: pwsh
+        working-directory: usvfs
+        run: |
+          cmake --preset vs2022-windows-x64 `
+            -B build_x64 `
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE\install\x64"
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          cmake --build build_x64 --config Release --target INSTALL
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build x86
+        shell: pwsh
+        working-directory: usvfs
+        run: |
+          cmake --preset vs2022-windows-x86 `
+            -B build_x86 `
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE\install\x86"
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          cmake --build build_x86 --config Release --target INSTALL
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Package USVFS files
+        shell: pwsh
+        run: |
+          $src = "$env:GITHUB_WORKSPACE\usvfs"
+          $package = "$env:GITHUB_WORKSPACE\package"
+
+          New-Item -ItemType Directory -Force -Path $package |
+            Out-Null
+
+          Copy-Item "$src\lib\usvfs_x64.dll" $package
+          Copy-Item "$src\lib\usvfs_x86.dll" $package
+          Copy-Item "$src\bin\usvfs_proxy_x64.exe" $package
+          Copy-Item "$src\bin\usvfs_proxy_x86.exe" $package
+
+          Get-ChildItem $package | Format-Table Name, Length
+
+          $expected = @(
+            'usvfs_x64.dll',
+            'usvfs_x86.dll',
+            'usvfs_proxy_x64.exe',
+            'usvfs_proxy_x86.exe'
+          )
+
+          foreach ($name in $expected) {
+            if (-not (Test-Path (Join-Path $package $name))) {
+              throw "File hasil build tidak ditemukan: $name"
+            }
+          }
+
+      - name: Upload patched binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: usvfs-0.5.7.2-arm-stack-alignment-patched
+          path: package/*
+          if-no-files-found: error
